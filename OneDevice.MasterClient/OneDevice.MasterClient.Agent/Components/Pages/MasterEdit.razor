@@ -1,0 +1,231 @@
+@page "/masters/new"
+@page "/masters/{Id:guid}"
+@using System.Text.Json
+@inject AgentRuntime Runtime
+@inject ISerialPortScanner Scanner
+@inject NavigationManager Nav
+
+<PageTitle>@(IsNew ? "Add master" : "Edit master") – OneDevice</PageTitle>
+
+<h1 class="h3 mb-3">@(IsNew ? "Add master" : $"Edit {_model.Name}")</h1>
+
+@if (_notFound)
+{
+    <div class="alert alert-warning">This master does not exist (anymore). <a href="">Back</a></div>
+    return;
+}
+
+<div class="row g-4" style="max-width: 1100px">
+    <div class="col-lg-6">
+        <h2 class="h5">1. Master</h2>
+
+        <label class="form-label mt-2">COM port</label>
+        <div class="input-group">
+            <select class="form-select" value="@_model.Connection" @onchange="OnPortChanged">
+                <option value="">– select –</option>
+                @foreach (var p in _ports)
+                {
+                    <option value="@p.PortName">@p.PortName – @p.Description@(p.MasterType != null ? $"  ✔ {p.MasterType.DisplayName}" : "")</option>
+                }
+                @if (!string.IsNullOrEmpty(_model.Connection) && _ports.All(p => p.PortName != _model.Connection))
+                {
+                    <option value="@_model.Connection">@_model.Connection (not present now)</option>
+                }
+            </select>
+            <button class="btn btn-outline-secondary" @onclick="ScanPorts" title="Search again">↻</button>
+        </div>
+        <div class="form-text">Masters we recognise by their USB id are marked with ✔.</div>
+
+        <label class="form-label mt-3">Master type</label>
+        <select class="form-select" value="@_model.MasterType" @onchange="OnTypeChanged">
+            <option value="">– select –</option>
+            @foreach (var t in MasterCatalog.All)
+            {
+                <option value="@t.Key">@t.DisplayName (@t.PortCount port@(t.PortCount == 1 ? "" : "s"))</option>
+            }
+        </select>
+
+        <label class="form-label mt-3">Name</label>
+        <input class="form-control" @bind="_model.Name" placeholder="e.g. Line 3 – filling station" maxlength="64" />
+
+        @if (_type != null)
+        {
+            <label class="form-label mt-3">Ports with sensors</label>
+            <div>
+                @for (var port = 0; port < _type.PortCount; port++)
+                {
+                    var p = port;
+                    <div class="form-check form-check-inline">
+                        <input class="form-check-input" type="checkbox" id="port@p" checked="@_model.SensorPorts.Contains(p)"
+                               @onchange="e => TogglePort(p, (bool)e.Value!)" />
+                        <label class="form-check-label" for="port@p">Port @(p + 1)</label>
+                    </div>
+                }
+            </div>
+            <div class="form-text">@_type.DisplayName has @_type.PortCount port@(_type.PortCount == 1 ? "" : "s"). After saving, the overview shows which ports really have a sensor.</div>
+        }
+
+        <label class="form-label mt-3">Send process data at most every … seconds</label>
+        <input class="form-control" type="number" min="1" max="3600" style="max-width: 10rem" @bind="_model.TelemetryIntervalSeconds" />
+        <div class="form-text">Only changes are sent.</div>
+
+        <div class="form-check mt-3">
+            <input class="form-check-input" type="checkbox" id="enabled" @bind="_model.Enabled" />
+            <label class="form-check-label" for="enabled">Enabled</label>
+        </div>
+    </div>
+
+    <div class="col-lg-6">
+        <h2 class="h5">2. Cloud</h2>
+        @foreach (var mode in Enum.GetValues<CloudMode>())
+        {
+            <div class="form-check">
+                <input class="form-check-input" type="radio" name="cloudMode" id="mode@mode" checked="@(_model.Cloud.Mode == mode)"
+                       @onchange="() => _model.Cloud.Mode = mode" />
+                <label class="form-check-label" for="mode@mode">
+                    @(mode switch
+                    {
+                        CloudMode.Offline => "Offline (local only)",
+                        CloudMode.ConnectionString => "Azure IoT Hub – device connection string",
+                        _ => "Azure Device Provisioning Service (DPS)"
+                    })
+                </label>
+            </div>
+        }
+
+        @if (_model.Cloud.Mode == CloudMode.ConnectionString)
+        {
+            <label class="form-label mt-3">Device connection string</label>
+            <input class="form-control" type="password" autocomplete="off" @bind="_model.Cloud.DeviceConnectionString"
+                   placeholder="HostName=…;DeviceId=…;SharedAccessKey=…" />
+        }
+        else if (_model.Cloud.Mode == CloudMode.Dps)
+        {
+            <label class="form-label mt-3">ID scope</label>
+            <input class="form-control" @bind="_model.Cloud.DpsIdScope" placeholder="0ne00XXXXXX" />
+            <label class="form-label mt-2">Registration ID</label>
+            <input class="form-control" @bind="_model.Cloud.DpsRegistrationId" />
+            <label class="form-label mt-2">Symmetric key</label>
+            <input class="form-control" type="password" autocomplete="off" @bind="_model.Cloud.DpsSymmetricKey" />
+            <label class="form-label mt-2">Global endpoint</label>
+            <input class="form-control" @bind="_model.Cloud.DpsGlobalEndpoint" />
+        }
+        @if (_model.Cloud.Mode != CloudMode.Offline)
+        {
+            <div class="form-text">Keys are stored encrypted on this PC (Windows DPAPI).</div>
+        }
+    </div>
+</div>
+
+@if (_error != null)
+{
+    <div class="alert alert-danger mt-4" style="max-width: 1100px">@_error</div>
+}
+
+<div class="mt-4 d-flex gap-2">
+    <button class="btn btn-primary" disabled="@_saving" @onclick="SaveAsync">@(_saving ? "Saving…" : "Save and connect")</button>
+    <a class="btn btn-outline-secondary" href="">Cancel</a>
+    @if (!IsNew)
+    {
+        <span class="ms-auto"></span>
+        @if (_confirmDelete)
+        {
+            <span class="align-self-center text-danger">Remove “@_model.Name”?</span>
+            <button class="btn btn-danger" @onclick="DeleteAsync">Yes, remove</button>
+            <button class="btn btn-outline-secondary" @onclick="() => _confirmDelete = false">No</button>
+        }
+        else
+        {
+            <button class="btn btn-outline-danger" @onclick="() => _confirmDelete = true">Remove master</button>
+        }
+    }
+</div>
+
+@code {
+    [Parameter] public Guid? Id { get; set; }
+
+    private MasterConfiguration _model = new() { SensorPorts = [] };
+    private MasterTypeInfo? _type;
+    private IReadOnlyList<SerialPortInfo> _ports = [];
+    private string? _error;
+    private bool _saving, _notFound, _confirmDelete;
+
+    private bool IsNew => Id == null;
+
+    protected override void OnParametersSet()
+    {
+        ScanPorts();
+        if (IsNew)
+        {
+            _model = new MasterConfiguration { SensorPorts = [] };
+            // Preselect the first recognised master that is not configured yet.
+            var free = _ports.FirstOrDefault(p => p.MasterType != null &&
+                                                  Runtime.Configuration.Masters.All(m => m.Connection != p.PortName));
+            if (free != null) SelectPort(free.PortName);
+        }
+        else
+        {
+            var existing = Runtime.Configuration.Masters.FirstOrDefault(m => m.Id == Id);
+            _notFound = existing == null;
+            if (existing != null)
+                _model = JsonSerializer.Deserialize<MasterConfiguration>(JsonSerializer.Serialize(existing))!; // edit a copy
+            _type = MasterCatalog.Find(_model.MasterType);
+        }
+    }
+
+    private void ScanPorts() => _ports = Scanner.Scan();
+
+    private void OnPortChanged(ChangeEventArgs e) => SelectPort(e.Value?.ToString() ?? "");
+
+    private void SelectPort(string port)
+    {
+        _model.Connection = port;
+        var recognised = _ports.FirstOrDefault(p => p.PortName == port)?.MasterType;
+        if (recognised != null) SetType(recognised);
+    }
+
+    private void OnTypeChanged(ChangeEventArgs e) => SetType(MasterCatalog.Find(e.Value?.ToString()));
+
+    private void SetType(MasterTypeInfo? type)
+    {
+        _type = type;
+        _model.MasterType = type?.Key ?? "";
+        if (type == null) return;
+        _model.SensorPorts.RemoveAll(p => p >= type.PortCount);
+        if (_model.SensorPorts.Count == 0) _model.SensorPorts.AddRange(Enumerable.Range(0, type.PortCount));
+        if (string.IsNullOrWhiteSpace(_model.Name)) _model.Name = type.DisplayName;
+    }
+
+    private void TogglePort(int port, bool on)
+    {
+        _model.SensorPorts.Remove(port);
+        if (on) _model.SensorPorts.Add(port);
+        _model.SensorPorts.Sort();
+    }
+
+    private async Task SaveAsync()
+    {
+        _error = Runtime.Validate(_model);
+        if (_error != null) return;
+        _saving = true;
+        try
+        {
+            await Runtime.SaveMasterAsync(_model);
+            Nav.NavigateTo("");
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task DeleteAsync()
+    {
+        await Runtime.RemoveMasterAsync(_model.Id);
+        Nav.NavigateTo("");
+    }
+}

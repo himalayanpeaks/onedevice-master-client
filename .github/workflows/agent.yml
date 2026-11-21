@@ -1,0 +1,95 @@
+name: Build, Test and Release Agent
+
+# - Pull requests / pushes to main: build, test and publish the agent (zip kept as a workflow artifact).
+# - Version tag (e.g. 0.1.0 or v0.1.0): additionally creates a GitHub release with the zip.
+
+on:
+  push:
+    branches: ["main"]
+    tags:
+      - '*.*.*'
+      - 'v*.*.*'
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+env:
+  SOLUTION: OneDevice.MasterClient/OneDevice.MasterClient.slnx
+  AGENT: OneDevice.MasterClient/OneDevice.MasterClient.Agent/OneDevice.MasterClient.Agent.csproj
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Determine version
+        id: version
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+              $ver = "${{ github.ref_name }}".TrimStart('v')
+          } else {
+              $lastTag = git describe --tags --abbrev=0 2>$null
+              $count = if ($lastTag) { git rev-list --count "$lastTag..HEAD" } else { git rev-list --count HEAD }
+              $base = if ($lastTag) { $lastTag.TrimStart('v') } else { "0.1.0" }
+              $ver = "$base-ci.$count"
+          }
+          "Version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "Version: $ver"
+
+      - name: Restore
+        run: dotnet restore ${{ env.SOLUTION }}
+
+      - name: Build
+        run: dotnet build ${{ env.SOLUTION }} --configuration Release --no-restore /p:Version=${{ steps.version.outputs.Version }}
+
+      - name: Test
+        run: dotnet test ${{ env.SOLUTION }} --configuration Release --no-build --verbosity normal
+
+      - name: Publish agent (self-contained, win-x64)
+        run: dotnet publish ${{ env.AGENT }} --configuration Release --runtime win-x64 --self-contained true --output ./publish /p:Version=${{ steps.version.outputs.Version }}
+
+      - name: Add install scripts
+        shell: pwsh
+        run: Copy-Item scripts/*.ps1 ./publish/
+
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path ./publish/* -DestinationPath ./OneDevice.MasterClient-${{ steps.version.outputs.Version }}-win-x64.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: agent
+          path: ./OneDevice.MasterClient-*.zip
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download zip
+        uses: actions/download-artifact@v5
+        with:
+          name: agent
+          path: ./dist
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" ./dist/*.zip --repo "${{ github.repository }}" --title "OneDevice Master Client ${{ github.ref_name }}" --generate-notes

@@ -1,0 +1,124 @@
+﻿@page "/"
+@implements IDisposable
+@inject AgentRuntime Runtime
+
+<PageTitle>Masters – OneDevice</PageTitle>
+
+<h1 class="h3 mb-3">Masters</h1>
+
+@if (Runtime.Configuration.Masters.Count == 0)
+{
+    <div class="alert alert-info">
+        No master configured yet. Connect your IO-Link master by USB, then
+        <a href="masters/new">add it here</a>.
+    </div>
+}
+
+@foreach (var master in Runtime.Configuration.Masters.OrderBy(m => m.Name))
+{
+    var runtime = Runtime.Find(master.Id);
+    var session = runtime?.Session;
+    var type = MasterCatalog.Find(master.MasterType);
+    <div class="card mb-4">
+        <div class="card-header d-flex align-items-center gap-2 flex-wrap">
+            <strong>@master.Name</strong>
+            <span class="text-muted">@(type?.DisplayName ?? master.MasterType) on @master.Connection</span>
+            <span class="ms-auto"></span>
+            @if (!master.Enabled)
+            {
+                <span class="badge text-bg-secondary">disabled</span>
+            }
+            else if (session?.IsConnected == true)
+            {
+                <span class="badge text-bg-success">master connected</span>
+            }
+            else
+            {
+                <span class="badge text-bg-danger" title="@session?.LastError">master not connected</span>
+            }
+            <CloudBadge Runtime="runtime" Mode="master.Cloud.Mode" />
+            <a class="btn btn-sm btn-outline-secondary" href="masters/@master.Id">Edit</a>
+            <button class="btn btn-sm btn-outline-primary" disabled="@(session?.IsConnected != true || _busy.Contains(master.Id))"
+                    @onclick="() => RescanAsync(master.Id)">
+                @(_busy.Contains(master.Id) ? "Scanning…" : "Rescan ports")
+            </button>
+        </div>
+        <div class="card-body">
+            @if (session?.LastError is { } error)
+            {
+                <div class="alert alert-warning py-2">@error</div>
+            }
+            <table class="table table-sm align-middle mb-3">
+                <thead>
+                <tr>
+                    <th>Port</th><th>State</th><th>Sensor</th><th>Vendor / Device ID</th><th>Serial</th><th>HW / FW</th><th>IO-Link</th>
+                </tr>
+                </thead>
+                <tbody>
+                @foreach (var port in session?.Ports ?? master.SensorPorts.Select(p => new PortStatus(p, PortState.NotProbed)).ToList())
+                {
+                    <tr>
+                        <td>@(port.Port + 1)</td>
+                        <td><PortStateBadge State="port.State" Error="@port.Error" /></td>
+                        <td>
+                            @if (port.Sensor is { } s)
+                            {
+                                <div><strong>@s.ProductName</strong> <span class="text-muted">@s.VendorName</span></div>
+                                <div class="small text-muted">@s.ProductText · @s.ProductId</div>
+                            }
+                        </td>
+                        <td>@(port.Sensor is { } i ? $"{i.VendorId} / {i.DeviceId}" : "")</td>
+                        <td>@port.Sensor?.SerialNumber</td>
+                        <td>@(port.Sensor is { } h ? $"{h.HardwareRevision} / {h.FirmwareRevision}" : "")</td>
+                        <td>@port.Sensor?.IoLinkRevision</td>
+                    </tr>
+                }
+                </tbody>
+            </table>
+
+            @if (session?.LatestProcessData is { } pd)
+            {
+                <div class="d-flex gap-4 flex-wrap small">
+                    <div><span class="text-muted">Process data (port @(pd.Port + 1)):</span> <code>@pd.DataHex</code></div>
+                    <div><span class="text-muted">valid:</span> @(pd.IsValid?.ToString() ?? "not reported by master")</div>
+                    <div><span class="text-muted">changed:</span> @pd.Timestamp.ToLocalTime().ToString("HH:mm:ss.fff")</div>
+                    <div><span class="text-muted">sent to cloud:</span> @runtime!.TelemetrySent messages (max 1 per @master.TelemetryIntervalSeconds s)</div>
+                </div>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    private readonly HashSet<Guid> _busy = [];
+    private Timer? _refresh;
+
+    protected override void OnInitialized()
+    {
+        Runtime.Changed += OnChanged;
+        // Process data changes often: refresh once per second instead of on every sample.
+        _refresh = new Timer(_ => InvokeAsync(StateHasChanged), null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+    }
+
+    private async Task RescanAsync(Guid id)
+    {
+        if (Runtime.Find(id) is not { } runtime) return;
+        _busy.Add(id);
+        try
+        {
+            await runtime.RescanAsync();
+        }
+        finally
+        {
+            _busy.Remove(id);
+        }
+    }
+
+    private void OnChanged(object? sender, EventArgs e) => InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        Runtime.Changed -= OnChanged;
+        _refresh?.Dispose();
+    }
+}

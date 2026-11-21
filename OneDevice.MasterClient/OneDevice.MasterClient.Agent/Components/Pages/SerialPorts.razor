@@ -1,0 +1,30 @@
+@page "/serial-ports"
+@inject ISerialPortScanner Scanner
+
+<PageTitle>Serial ports – OneDevice</PageTitle>
+
+<h1 class="h3 mb-3">Serial ports on this PC</h1>
+<button class="btn btn-sm btn-outline-primary mb-3" @onclick="Scan">Refresh</button>
+
+<table class="table table-sm">
+    <thead><tr><th>Port</th><th>Device</th><th>USB VID / PID</th><th>Recognised master</th></tr></thead>
+    <tbody>
+    @foreach (var p in _ports)
+    {
+        <tr class="@(p.MasterType != null ? "table-success" : "")">
+            <td>@p.PortName</td>
+            <td>@p.Description</td>
+            <td>@(p.UsbVendorId != null ? $"{p.UsbVendorId} / {p.UsbProductId}" : "–")</td>
+            <td>@(p.MasterType is { } t ? $"{t.DisplayName} ({t.PortCount} port{(t.PortCount == 1 ? "" : "s")})" : "")</td>
+        </tr>
+    }
+    </tbody>
+</table>
+
+@code {
+    private IReadOnlyList<SerialPortInfo> _ports = [];
+
+    protected override void OnInitialized() => Scan();
+
+    private void Scan() => _ports = Scanner.Scan();
+}

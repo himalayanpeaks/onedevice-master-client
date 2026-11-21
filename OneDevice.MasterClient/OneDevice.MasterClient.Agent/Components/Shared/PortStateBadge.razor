@@ -1,0 +1,24 @@
+@switch (State)
+{
+    case PortState.SensorFound:
+        <span class="badge text-bg-success">sensor</span>
+        break;
+    case PortState.Empty:
+        <span class="badge text-bg-light border" title="@Error">no sensor</span>
+        break;
+    case PortState.Error:
+        <span class="badge text-bg-danger" title="@Error">error</span>
+        @if (!string.IsNullOrEmpty(Error))
+        {
+            <div class="small text-danger">@Error</div>
+        }
+        break;
+    default:
+        <span class="badge text-bg-secondary">not checked</span>
+        break;
+}
+
+@code {
+    [Parameter] public PortState State { get; set; }
+    [Parameter] public string? Error { get; set; }
+}

@@ -31,6 +31,7 @@ bld/
 [Oo]bj/
 [Ll]og/
 [Ll]ogs/
+[Dd]ocs/
 
 # Visual Studio 2015/2017 cache/options directory
 .vs/
@@ -398,17 +399,6 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
-/OneDriver.Master/OneDriver.Master.IoLink.gRPC/appsettings.json
-
-# Local secrets (do not commit)
-.env
-.env.*
-!.env.example
-**/.env
-**/.env.*
-!**/.env.example
-**/local.settings.json
-**/appsettings.Local.json
-**/appsettings.*.local.json
-.azure/
-azure/
+/OneDevice.Master/OneDevice.Master.IoLink.gRPC/appsettings.json
+/OneDevice.Master/OneDevice.Master.IoLink.gRPC/AZURE_SETUP.md
+/docs/IO-Link_Test-Spec_100032_M1.1.5_Oct-2025.pdf

@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="OneDevice.MasterClient.Agent/OneDevice.MasterClient.Agent.csproj" />
+  <Project Path="OneDevice.MasterClient.Core.UnitTest/OneDevice.MasterClient.Core.UnitTest.csproj" />
+  <Project Path="OneDevice.MasterClient.Core/OneDevice.MasterClient.Core.csproj" />
+</Solution>

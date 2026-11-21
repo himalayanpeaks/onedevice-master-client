@@ -1,0 +1,21 @@
+@if (Mode == CloudMode.Offline || Runtime == null)
+{
+    <span class="badge text-bg-light border">cloud: off</span>
+}
+else
+{
+    var cloud = Runtime.Cloud;
+    var (css, text) = cloud.State switch
+    {
+        CloudConnectionState.Connected => ("text-bg-success", "cloud connected"),
+        CloudConnectionState.Connecting => ("text-bg-warning", "cloud connecting"),
+        CloudConnectionState.Error => ("text-bg-danger", "cloud error"),
+        _ => ("text-bg-secondary", "cloud disconnected")
+    };
+    <span class="badge @css" title="@(cloud.LastError ?? cloud.DeviceId)">@text</span>
+}
+
+@code {
+    [Parameter] public MasterRuntime? Runtime { get; set; }
+    [Parameter] public CloudMode Mode { get; set; }
+}
