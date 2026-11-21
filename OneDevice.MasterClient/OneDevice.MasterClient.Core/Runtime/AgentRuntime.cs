@@ -27,9 +27,10 @@ public sealed class AgentRuntime(
     private readonly SemaphoreSlim _gate = new(1, 1);
     private AgentConfiguration _config = new();
 
+    /// <summary>Version of the agent executable (falls back to this library when hosted elsewhere, e.g. tests).</summary>
     public static string AgentVersion { get; } =
-        typeof(AgentRuntime).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
-            .Split('+')[0] ?? "0.0.0";
+        (Assembly.GetEntryAssembly() ?? typeof(AgentRuntime).Assembly)
+        .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion.Split('+')[0] ?? "0.0.0";
 
     /// <summary>Copy of the current configuration (secrets included: only for the local page).</summary>
     public AgentConfiguration Configuration => _config;

@@ -25,7 +25,27 @@ public sealed class MasterRuntime : IAsyncDisposable
         _logger = logger;
         Session.ProcessDataChanged += OnProcessData;
         Session.StateChanged += (_, _) => Changed?.Invoke(this, EventArgs.Empty);
-        Cloud.StateChanged += (_, _) => Changed?.Invoke(this, EventArgs.Empty);
+        Cloud.StateChanged += OnCloudStateChanged;
+    }
+
+    private CloudConnectionState _lastCloudState = CloudConnectionState.Disconnected;
+
+    // On every (re)connect: publish the current state and the latest process data. Process data is only sent on
+    // change, so a sample produced while the cloud was not connected (or a value that never changes) would
+    // otherwise never reach the cloud.
+    private void OnCloudStateChanged(object? sender, EventArgs e)
+    {
+        var state = Cloud.State;
+        var becameConnected = state == CloudConnectionState.Connected && _lastCloudState != CloudConnectionState.Connected;
+        _lastCloudState = state;
+        Changed?.Invoke(this, EventArgs.Empty);
+        if (!becameConnected) return;
+
+        _ = Task.Run(async () =>
+        {
+            await ReportAsync(_stop.Token).ConfigureAwait(false);
+            if (Session.LatestProcessData is { } latest) await SendAsync(ToMessage(latest)).ConfigureAwait(false);
+        });
     }
 
     public MasterSession Session { get; }
@@ -119,12 +139,13 @@ public sealed class MasterRuntime : IAsyncDisposable
         }
     }
 
-    private void OnProcessData(object? sender, ProcessDataSample sample)
+    private void OnProcessData(object? sender, ProcessDataSample sample) => _ = SendAsync(ToMessage(sample));
+
+    private ProcessDataMessage ToMessage(ProcessDataSample sample)
     {
         var sensor = Session.Ports.FirstOrDefault(p => p.Port == sample.Port)?.Sensor;
-        var message = new ProcessDataMessage(Session.Configuration.Id.ToString(), Session.Configuration.Name,
+        return new ProcessDataMessage(Session.Configuration.Id.ToString(), Session.Configuration.Name,
             sample.Port, sensor?.VendorId, sensor?.DeviceId, sample.Timestamp, sample.DataHex, sample.IsValid);
-        _ = SendAsync(message);
     }
 
     private async Task SendAsync(ProcessDataMessage message)
