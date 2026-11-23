@@ -82,7 +82,18 @@
                     <div><span class="text-muted">Process data (port @(pd.Port + 1)):</span> <code>@pd.DataHex</code></div>
                     <div><span class="text-muted">valid:</span> @(pd.IsValid?.ToString() ?? "not reported by master")</div>
                     <div><span class="text-muted">changed:</span> @pd.Timestamp.ToLocalTime().ToString("HH:mm:ss.fff")</div>
-                    <div><span class="text-muted">sent to cloud:</span> @runtime!.TelemetrySent messages (max 1 per @master.TelemetryIntervalSeconds s)</div>
+                    <div>
+                        <span class="text-muted">cloud streaming:</span>
+                        @if (runtime!.Telemetry.IsActive)
+                        {
+                            <span>on until @runtime.Telemetry.ExpiresAt?.ToLocalTime().ToString("HH:mm:ss") (renewed while the sensor page is open)</span>
+                        }
+                        else
+                        {
+                            <span>off (starts when someone opens the sensor in the cloud)</span>
+                        }
+                    </div>
+                    <div><span class="text-muted">sent to cloud:</span> @runtime.TelemetrySent messages (max 1 per @master.TelemetryIntervalSeconds s, keep-alive every @((int)TelemetryGate.KeepAliveInterval.TotalSeconds) s)</div>
                 </div>
             }
         </div>

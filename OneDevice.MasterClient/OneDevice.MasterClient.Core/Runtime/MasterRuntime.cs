@@ -5,10 +5,10 @@ using OneDevice.MasterClient.Core.Masters;
 namespace OneDevice.MasterClient.Core.Runtime;
 
 /// <summary>
-///     Keeps one master running: connects it, probes its ports, connects it to the cloud, forwards process data and
-///     retries after failures (master unplugged, network down).
+///     Keeps one master running: connects it, probes its ports, connects it to the cloud, forwards process data while
+///     the cloud asks for it (<see cref="Telemetry" />) and retries after failures (master unplugged, network down).
 /// </summary>
-public sealed class MasterRuntime : IAsyncDisposable
+public sealed class MasterRuntime : IAsyncDisposable, IProcessDataStreaming
 {
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(15);
 
@@ -17,12 +17,16 @@ public sealed class MasterRuntime : IAsyncDisposable
     private readonly CancellationTokenSource _stop = new();
     private Task? _loop;
 
-    public MasterRuntime(MasterSession session, ICloudConnector cloud, string agentVersion, ILogger logger)
+    public MasterRuntime(MasterSession session, ICloudConnector cloud, string agentVersion, ILogger logger,
+        TimeProvider? time = null)
     {
         Session = session;
         Cloud = cloud;
         _agentVersion = agentVersion;
         _logger = logger;
+        _time = time ?? TimeProvider.System;
+        Telemetry = new TelemetryGate(OnKeepAlive, _time);
+        Telemetry.Changed += OnTelemetryChanged;
         Session.ProcessDataChanged += OnProcessData;
         Session.StateChanged += (_, _) => Changed?.Invoke(this, EventArgs.Empty);
         Cloud.StateChanged += OnCloudStateChanged;
@@ -30,9 +34,9 @@ public sealed class MasterRuntime : IAsyncDisposable
 
     private CloudConnectionState _lastCloudState = CloudConnectionState.Disconnected;
 
-    // On every (re)connect: publish the current state and the latest process data. Process data is only sent on
-    // change, so a sample produced while the cloud was not connected (or a value that never changes) would
-    // otherwise never reach the cloud.
+    // On every (re)connect: publish the current state and, while streaming, the latest process data. Process data is
+    // only sent on change, so a sample produced while the cloud was not connected would otherwise reach the cloud
+    // only with the next keep-alive.
     private void OnCloudStateChanged(object? sender, EventArgs e)
     {
         var state = Cloud.State;
@@ -44,12 +48,59 @@ public sealed class MasterRuntime : IAsyncDisposable
         _ = Task.Run(async () =>
         {
             await ReportAsync(_stop.Token).ConfigureAwait(false);
-            if (Session.LatestProcessData is { } latest) await SendAsync(ToMessage(latest)).ConfigureAwait(false);
+            if (Telemetry.IsActive && Session.LatestProcessData is { } latest)
+                await SendAsync(ToMessage(latest)).ConfigureAwait(false);
         });
     }
 
     public MasterSession Session { get; }
     public ICloudConnector Cloud { get; }
+
+    /// <summary>Whether process data is streamed to the cloud right now (started and renewed by the website).</summary>
+    public TelemetryGate Telemetry { get; }
+
+    private readonly TimeProvider _time;
+    private bool _wasStreaming;
+
+    public StreamingStatus StartStreaming(TimeSpan? lease)
+    {
+        if (Telemetry.Start(lease) && Session.LatestProcessData is { } latest)
+            _ = SendAsync(ToMessage(latest)); // the viewer sees the current value at once, not with the next change
+        return StreamingStatus();
+    }
+
+    public StreamingStatus StopStreaming()
+    {
+        Telemetry.Stop();
+        return StreamingStatus();
+    }
+
+    private StreamingStatus StreamingStatus()
+    {
+        var active = Telemetry.IsActive;
+        return new StreamingStatus(active, active ? Telemetry.ExpiresAt : null,
+            Math.Max(1, Session.Configuration.TelemetryIntervalSeconds), (int)TelemetryGate.KeepAliveInterval.TotalSeconds);
+    }
+
+    private void OnTelemetryChanged(object? sender, EventArgs e)
+    {
+        var streaming = Telemetry.IsActive;
+        if (streaming != _wasStreaming)
+        {
+            _wasStreaming = streaming;
+            _logger.LogInformation("Master {Name}: process data streaming to the cloud {State}",
+                Session.Configuration.Name, streaming ? "started" : "stopped");
+        }
+
+        Changed?.Invoke(this, EventArgs.Empty);
+    }
+
+    // Nothing sent for the keep-alive interval: the value has not changed. Send it again so the viewer sees it is live.
+    private void OnKeepAlive()
+    {
+        if (Session.LatestProcessData is { } latest)
+            _ = SendAsync(ToMessage(latest) with { Timestamp = _time.GetUtcNow(), KeepAlive = true });
+    }
 
     /// <summary>Number of process-data messages handed to the cloud connector.</summary>
     public long TelemetrySent => Interlocked.Read(ref _telemetrySent);
@@ -80,6 +131,7 @@ public sealed class MasterRuntime : IAsyncDisposable
             }
 
         Session.ProcessDataChanged -= OnProcessData;
+        Telemetry.Dispose();
         await Session.DisposeAsync().ConfigureAwait(false);
         await Cloud.DisposeAsync().ConfigureAwait(false);
         _stop.Dispose();
@@ -87,7 +139,7 @@ public sealed class MasterRuntime : IAsyncDisposable
 
     private async Task RunAsync(CancellationToken ct)
     {
-        var commands = new MasterCommandHandler(Session, _agentVersion, () => ReportAsync(ct));
+        var commands = new MasterCommandHandler(Session, _agentVersion, () => ReportAsync(ct), this);
         var cloudConnected = false;
         while (!ct.IsCancellationRequested)
         {
@@ -139,7 +191,10 @@ public sealed class MasterRuntime : IAsyncDisposable
         }
     }
 
-    private void OnProcessData(object? sender, ProcessDataSample sample) => _ = SendAsync(ToMessage(sample));
+    private void OnProcessData(object? sender, ProcessDataSample sample)
+    {
+        if (Telemetry.IsActive) _ = SendAsync(ToMessage(sample));
+    }
 
     private ProcessDataMessage ToMessage(ProcessDataSample sample)
     {
@@ -150,6 +205,7 @@ public sealed class MasterRuntime : IAsyncDisposable
 
     private async Task SendAsync(ProcessDataMessage message)
     {
+        Telemetry.NoteSent();
         try
         {
             await Cloud.SendProcessDataAsync(message, _stop.Token).ConfigureAwait(false);

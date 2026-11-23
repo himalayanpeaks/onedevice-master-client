@@ -26,6 +26,12 @@ public sealed record ProcessDataMessage(
     string PdIn,
     bool? PdValid)
 {
+    /// <summary>
+    ///     True when the value did not change and is sent again only to show the stream is alive (timestamp = time of
+    ///     sending). Omitted for regular samples.
+    /// </summary>
+    public bool? KeepAlive { get; init; }
+
     public string MessageType => "processData";
     public int SchemaVersion => 1;
 }
@@ -111,4 +117,21 @@ public sealed record CommandResponse(int Status, string Json)
 
     public static CommandResponse Error(int status, string message) =>
         new(status, JsonSerializer.Serialize(new { error = message }, CloudJson.Options));
+}
+
+/// <summary>startProcessData request: lease in seconds (10..600, default 60). Renew before it runs out.</summary>
+public sealed record StartProcessDataRequest(int? LeaseSeconds);
+
+/// <summary>Answer of startProcessData / stopProcessData.</summary>
+/// <param name="Streaming">Process data is sent to the cloud.</param>
+/// <param name="ExpiresAt">Streaming stops at this time unless renewed.</param>
+/// <param name="IntervalSeconds">At most one message per this interval (on change).</param>
+/// <param name="KeepAliveSeconds">An unchanged value is sent again after this time.</param>
+public sealed record StreamingStatus(bool Streaming, DateTimeOffset? ExpiresAt, int IntervalSeconds, int KeepAliveSeconds);
+
+/// <summary>Switches process-data streaming to the cloud on (with a lease) and off.</summary>
+public interface IProcessDataStreaming
+{
+    StreamingStatus StartStreaming(TimeSpan? lease);
+    StreamingStatus StopStreaming();
 }

@@ -12,9 +12,18 @@ namespace OneDevice.MasterClient.Core.Cloud;
 ///         <item>getState → <see cref="MasterReport" /></item>
 ///         <item>getEvents {port, after} → <see cref="EventsResponse" /> (IO-Link Events, communication lost / started)</item>
 ///         <item>setDataStorage {port, enabled} → {success, error} (master Data Storage on / off for the port)</item>
+///         <item>
+///             startProcessData {leaseSeconds} → <see cref="StreamingStatus" /> (stream process data to the cloud
+///             until the lease runs out; call again to renew)
+///         </item>
+///         <item>stopProcessData → <see cref="StreamingStatus" /></item>
 ///     </list>
 /// </summary>
-public sealed class MasterCommandHandler(MasterSession session, string agentVersion, Func<Task>? afterRescan = null)
+public sealed class MasterCommandHandler(
+    MasterSession session,
+    string agentVersion,
+    Func<Task>? afterRescan = null,
+    IProcessDataStreaming? streaming = null)
     : ICloudCommandHandler
 {
     public async Task<CommandResponse> HandleAsync(string method, string payloadJson, CancellationToken ct)
@@ -67,6 +76,21 @@ public sealed class MasterCommandHandler(MasterSession session, string agentVers
                 var result = await session.SetDataStorageAsync(request!.Port, request.Enabled, ct).ConfigureAwait(false);
                 return CommandResponse.Ok(ParameterResponse.From(result));
             }
+            case "startprocessdata":
+            {
+                if (streaming == null) return CommandResponse.Error(501, "Process data streaming is not available");
+                var request = new StartProcessDataRequest(null);
+                if (!string.IsNullOrWhiteSpace(payloadJson) && payloadJson.Trim() != "null" &&
+                    !TryParse(payloadJson, out request, out var error))
+                    return error!;
+                if (request!.LeaseSeconds is < 1) return CommandResponse.Error(400, "leaseSeconds must be positive");
+                var lease = request.LeaseSeconds is { } seconds ? TimeSpan.FromSeconds(seconds) : (TimeSpan?)null;
+                return CommandResponse.Ok(streaming.StartStreaming(lease));
+            }
+            case "stopprocessdata":
+                return streaming == null
+                    ? CommandResponse.Error(501, "Process data streaming is not available")
+                    : CommandResponse.Ok(streaming.StopStreaming());
             default:
                 return CommandResponse.Error(404, $"Unknown method '{method}'");
         }
