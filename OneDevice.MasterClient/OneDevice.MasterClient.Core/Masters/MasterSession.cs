@@ -44,6 +44,15 @@ public sealed class MasterSession : IAsyncDisposable
     private Dictionary<int, PortStatus> _ports;
     private int? _streamingPort;
     private ProcessDataSample? _latest;
+    private readonly TimeProvider _time;
+    private readonly Dictionary<int, bool?> _communicating = new();
+    private readonly Dictionary<int, uint> _sensorStatus = new();
+    private readonly HashSet<int> _dataStorageDisabled = [];
+    private CancellationTokenSource? _monitorCts;
+    private Task? _monitor;
+
+    /// <summary>How often the communication state of the ports is read (IOL_GetSensorStatus).</summary>
+    public static readonly TimeSpan MonitorInterval = TimeSpan.FromMilliseconds(200);
 
     public MasterSession(MasterConfiguration configuration, MasterTypeInfo type, IMasterHAL hal,
         ILogger? logger = null, TimeProvider? time = null)
@@ -52,6 +61,7 @@ public sealed class MasterSession : IAsyncDisposable
         Type = type;
         _hal = hal;
         _logger = logger ?? NullLogger.Instance;
+        _time = time ?? TimeProvider.System;
         _ports = ConfiguredPorts().ToDictionary(p => p, p => new PortStatus(p, PortState.NotProbed));
         _throttle = new LatestValueThrottle<ProcessDataSample>(
             TimeSpan.FromSeconds(Math.Max(1, configuration.TelemetryIntervalSeconds)),
@@ -75,6 +85,27 @@ public sealed class MasterSession : IAsyncDisposable
         }
     }
 
+    /// <summary>IO-Link Events and communication changes of the ports (latest 500).</summary>
+    public PortEventLog Events { get; } = new();
+
+    /// <summary>Last sensor status bits read from the master per port (IOL_GetSensorStatus), if any.</summary>
+    public uint? SensorStatus(int port)
+    {
+        lock (_stateLock) return _sensorStatus.TryGetValue(port, out var s) ? s : null;
+    }
+
+    /// <summary>Communicating (PREOPERATE / OPERATE) per port, null while unknown.</summary>
+    public bool? IsCommunicating(int port)
+    {
+        lock (_stateLock) return _communicating.GetValueOrDefault(port);
+    }
+
+    /// <summary>Data Storage of the master for this port (on by default).</summary>
+    public bool IsDataStorageEnabled(int port)
+    {
+        lock (_stateLock) return !_dataStorageDisabled.Contains(port);
+    }
+
     /// <summary>Process data changed (at most once per telemetry interval).</summary>
     public event EventHandler<ProcessDataSample>? ProcessDataChanged;
 
@@ -92,7 +123,11 @@ public sealed class MasterSession : IAsyncDisposable
             IsConnected = result == OneDevice.Module.Definition.ConnectionError.NoError;
             LastError = IsConnected ? null : $"Cannot open {Type.DisplayName} on {Configuration.Connection}: {result}";
             if (!IsConnected) _logger.LogWarning("{Error}", LastError);
-            else _logger.LogInformation("Connected to {Type} on {Connection}", Type.DisplayName, Configuration.Connection);
+            else
+            {
+                _logger.LogInformation("Connected to {Type} on {Connection}", Type.DisplayName, Configuration.Connection);
+                StartMonitor();
+            }
         }
         finally
         {
@@ -184,8 +219,44 @@ public sealed class MasterSession : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    ///     Switches the master's Data Storage for a port on or off (port configuration; the port restarts communication).
+    ///     The IO-Link Test Specification requires Data Storage off for reset tests.
+    /// </summary>
+    public async Task<IsduResult> SetDataStorageAsync(int port, bool enabled, CancellationToken ct = default)
+    {
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (!IsConnected) return IsduResult.Failed("Master not connected");
+            if (!IsConfiguredPort(port)) return IsduResult.Failed($"Port {port} is not configured");
+            lock (_stateLock)
+            {
+                if (enabled) _dataStorageDisabled.Remove(port);
+                else _dataStorageDisabled.Add(port);
+            }
+
+            var status = await Task.Run(() =>
+            {
+                SelectPort(port);
+                return SwitchToIoLink(port);
+            }, ct).ConfigureAwait(false);
+            var ok = status == t_eInternal_Return_Codes.RETURN_OK;
+            _logger.LogInformation("Port {Port}: master Data Storage {State}: {Status}", port,
+                enabled ? "enabled" : "disabled", status);
+            return ok
+                ? new IsduResult(true, [], 0, 0, status.ToString())
+                : IsduResult.Failed($"Port configuration failed: {status}");
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     public async Task DisconnectAsync()
     {
+        await StopMonitorAsync().ConfigureAwait(false);
         await _gate.WaitAsync().ConfigureAwait(false);
         try
         {
@@ -230,7 +301,7 @@ public sealed class MasterSession : IAsyncDisposable
         try
         {
             _hal.SensorPortNumber = port;
-            var mode = _hal.ConnectSensorWithMaster();
+            var mode = SwitchToIoLink(port);
             if (mode != t_eInternal_Return_Codes.RETURN_OK)
                 return new PortStatus(port, PortState.Error, Error: $"Port could not be switched to IO-Link: {mode}");
 
@@ -265,6 +336,13 @@ public sealed class MasterSession : IAsyncDisposable
         }
     }
 
+    /// <summary>Port to IO-Link OPERATE, with the master's Data Storage as configured for the port.</summary>
+    private t_eInternal_Return_Codes SwitchToIoLink(int port) =>
+        IsDataStorageEnabled(port)
+            ? _hal.ConnectSensorWithMaster()
+            : _hal.SetMode(t_eTargetMode.SM_MODE_IOLINK_OPERATE, t_ePortModeDetails.SM_MODE_FREE_RUNNING,
+                t_eDsConfigureCommands.DS_CFG_DISABLED, t_eIoLinkVersion.VERSION_1_1);
+
     private IsduResult Read(ushort index, byte subindex)
     {
         var status = _hal.ReadRecord(index, subindex, out var data, out _, out var errorCode, out var additionalCode);
@@ -296,11 +374,131 @@ public sealed class MasterSession : IAsyncDisposable
 
     private void OnHalProcessData(object sender, InternalDataHAL e)
     {
+        if (e.HasEvent)
+        {
+            var ev = Events.Add(e.ChannelNumber, _time.GetUtcNow(), PortEventKind.Event, e.EventCode,
+                EventQualifier.Mode(e.Mode), EventQualifier.Type(e.Type), e.Instance, e.LocalGenerated != 0, e.SensorStatus);
+            _logger.LogInformation(
+                "Port {Port}: IO-Link Event 0x{Code:X4} mode {Mode} type {Type} instance {Instance} master {Local} (#{Sequence})",
+                ev.Port, ev.Code, ev.Mode, ev.Type, ev.Instance, ev.LocalGenerated, ev.Sequence);
+        }
+
         if (!e.ProcessDataChanged || e.ProcessData is not { Length: > 0 } || _streamingPort is not { } port) return;
         var sample = new ProcessDataSample(port, (byte[])e.ProcessData.Clone(), e.IsProcessDataValid,
             new DateTimeOffset(e.TimeStamp.ToUniversalTime(), TimeSpan.Zero));
         Volatile.Write(ref _latest, sample);
         _throttle.Post(sample);
+    }
+
+    // ---- communication monitor ----
+
+    private void StartMonitor()
+    {
+        if (_monitor != null) return;
+        _monitorCts = new CancellationTokenSource();
+        var ct = _monitorCts.Token;
+        _monitor = Task.Run(async () =>
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    await Task.Delay(MonitorInterval, _time, ct).ConfigureAwait(false);
+                    await PollCommunicationAsync(ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Communication monitor");
+                }
+            }
+        }, ct);
+    }
+
+    private async Task StopMonitorAsync()
+    {
+        if (_monitorCts == null) return;
+        await _monitorCts.CancelAsync().ConfigureAwait(false);
+        try
+        {
+            if (_monitor != null) await _monitor.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+
+        _monitorCts.Dispose();
+        _monitorCts = null;
+        _monitor = null;
+    }
+
+    /// <summary>
+    ///     Communication state of the selected port: IOL_GetMode sensor state (0xFF OPERATE, 0x80 PREOPERATE,
+    ///     0x40 wrong sensor, 0x00 disconnected) – reliable on the TMG USB V2, whose IOL_GetSensorStatus stays 0 until
+    ///     the port is reconfigured. Falls back to the sensor status bits for HALs without GetMode.
+    /// </summary>
+    private bool? ReadSensorState(out uint state)
+    {
+        try
+        {
+            var result = _hal.GetMode(out _, out _, out _, out _, out _, out var sensorState, out _, out _);
+            state = sensorState;
+            // RESULT_SERVICE_PENDING and errors: state not known right now
+            return result == t_eInternal_Return_Codes.RETURN_OK ? sensorState is 0xFF or 0x80 : null;
+        }
+        catch (NotImplementedException)
+        {
+            state = 0;
+            return _hal.GetSensorStatus(out state) == t_eInternal_Return_Codes.RETURN_OK
+                ? SensorStatusBits.IsCommunicating(state)
+                : null;
+        }
+    }
+
+    /// <summary>Reads the sensor state of every port and records communication lost / started.</summary>
+    internal async Task PollCommunicationAsync(CancellationToken ct = default)
+    {
+        var started = new List<int>();
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (!IsConnected) return;
+            foreach (var port in ConfiguredPorts())
+            {
+                SelectPort(port);
+                if (ReadSensorState(out var status) is not { } now) continue;
+                bool? before;
+                uint? previousStatus;
+                lock (_stateLock)
+                {
+                    previousStatus = _sensorStatus.TryGetValue(port, out var p) ? p : null;
+                    _sensorStatus[port] = status;
+                    before = _communicating.GetValueOrDefault(port);
+                    _communicating[port] = now;
+                }
+
+                if (previousStatus != status)
+                    _logger.LogDebug("Port {Port}: sensor status 0x{Status:X2}", port, status);
+                if (before == null || now == before) continue;
+                var kind = now ? PortEventKind.CommunicationStarted : PortEventKind.CommunicationLost;
+                var ev = Events.Add(port, _time.GetUtcNow(), kind, sensorStatus: status);
+                _logger.LogInformation("Port {Port}: {Kind} (sensor status 0x{Status:X2}, #{Sequence})", port, kind,
+                    status, ev.Sequence);
+                if (now) started.Add(port);
+            }
+        }
+        finally
+        {
+            _gate.Release();
+        }
+
+        // A sensor that starts communicating on a port without identity (plugged in, or too slow at startup)
+        // is probed again.
+        if (started.Any(p => Ports.FirstOrDefault(s => s.Port == p)?.State != PortState.SensorFound))
+            await ProbePortsAsync(ct).ConfigureAwait(false);
     }
 
     private void RaiseStateChanged()

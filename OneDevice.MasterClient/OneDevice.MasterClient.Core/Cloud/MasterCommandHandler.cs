@@ -10,6 +10,8 @@ namespace OneDevice.MasterClient.Core.Cloud;
 ///         <item>writeParameter {port, index, subindex, data (hex)} → {success, isduError, error}</item>
 ///         <item>rescan → <see cref="MasterReport" /> (probes the ports again)</item>
 ///         <item>getState → <see cref="MasterReport" /></item>
+///         <item>getEvents {port, after} → <see cref="EventsResponse" /> (IO-Link Events, communication lost / started)</item>
+///         <item>setDataStorage {port, enabled} → {success, error} (master Data Storage on / off for the port)</item>
 ///     </list>
 /// </summary>
 public sealed class MasterCommandHandler(MasterSession session, string agentVersion, Func<Task>? afterRescan = null)
@@ -52,16 +54,32 @@ public sealed class MasterCommandHandler(MasterSession session, string agentVers
                 return CommandResponse.Ok(MasterReport.From(session, agentVersion));
             case "getstate":
                 return CommandResponse.Ok(MasterReport.From(session, agentVersion));
+            case "getevents":
+            {
+                if (!TryParse<EventsRequest>(payloadJson, out var request, out var error)) return error!;
+                return CommandResponse.Ok(new EventsResponse(session.Events.LastSequence,
+                    session.IsCommunicating(request!.Port), session.SensorStatus(request.Port),
+                    session.IsDataStorageEnabled(request.Port), session.Events.After(request.After, request.Port)));
+            }
+            case "setdatastorage":
+            {
+                if (!TryParse<DataStorageRequest>(payloadJson, out var request, out var error)) return error!;
+                var result = await session.SetDataStorageAsync(request!.Port, request.Enabled, ct).ConfigureAwait(false);
+                return CommandResponse.Ok(ParameterResponse.From(result));
+            }
             default:
                 return CommandResponse.Error(404, $"Unknown method '{method}'");
         }
     }
 
-    private static bool TryParse(string json, out ParameterRequest? request, out CommandResponse? error)
+    private static bool TryParse(string json, out ParameterRequest? request, out CommandResponse? error) =>
+        TryParse<ParameterRequest>(json, out request, out error);
+
+    private static bool TryParse<T>(string json, out T? request, out CommandResponse? error) where T : class
     {
         try
         {
-            request = JsonSerializer.Deserialize<ParameterRequest>(json, CloudJson.Options);
+            request = JsonSerializer.Deserialize<T>(json, CloudJson.Options);
             error = request == null ? CommandResponse.Error(400, "Request body is missing") : null;
             return request != null;
         }

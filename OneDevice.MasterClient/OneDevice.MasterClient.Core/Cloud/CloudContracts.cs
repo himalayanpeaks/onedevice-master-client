@@ -90,6 +90,20 @@ public sealed record ParameterResponse(bool Success, string? Data, int IsduError
         new(r.Success, r.Success && r.Data.Length > 0 ? r.DataHex : null, r.IsduError, r.ErrorText);
 }
 
+/// <summary>Request of the direct method getEvents: events of a port after a sequence number.</summary>
+public sealed record EventsRequest(int Port, long After = 0);
+
+/// <summary>Response of getEvents: events plus the current communication state of the port.</summary>
+public sealed record EventsResponse(
+    long LastSequence,
+    bool? Communicating,
+    uint? SensorStatus,
+    bool DataStorageEnabled,
+    IReadOnlyList<PortEvent> Events);
+
+/// <summary>Request of the direct method setDataStorage.</summary>
+public sealed record DataStorageRequest(int Port, bool Enabled);
+
 /// <summary>Result of a cloud command: HTTP-like status and a JSON payload.</summary>
 public sealed record CommandResponse(int Status, string Json)
 {

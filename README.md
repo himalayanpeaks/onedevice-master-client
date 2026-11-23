@@ -34,6 +34,8 @@ Each master is one IoT Hub device. Supported masters: TMG IO-Link USB Master V2 
 | Direct method | `writeParameter` | `{ port, index, subindex, data (hex) }` → `{ success, isduError, error }` |
 | Direct method | `rescan` | – → reported state after probing the ports again |
 | Direct method | `getState` | – → reported state |
+| Direct method | `getEvents` | `{ port, after }` → `{ lastSequence, communicating, sensorStatus, dataStorageEnabled, events }`: IO-Link Events (mode / type normalized to 1–3) and communication lost / started of the port, numbered |
+| Direct method | `setDataStorage` | `{ port, enabled }` → `{ success, isduError, error }`: master Data Storage on / off for the port (reset tests need it off) |
 
 Ports are 0-based in the protocol and shown 1-based on the setup page. ISDU errors are reported as e.g.
 `0x8030` "Parameter value out of range".
