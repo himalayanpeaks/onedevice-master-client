@@ -35,7 +35,7 @@ builder.Services.AddRazorComponents().AddInteractiveServerComponents();
 builder.Services.AddSingleton(new ConfigurationStore(builder.Configuration["Agent:ConfigPath"] ?? ConfigurationStore.DefaultPath));
 builder.Services.AddSingleton<ISerialPortScanner, SerialPortScanner>();
 builder.Services.AddSingleton(sp => new AgentRuntime(sp.GetRequiredService<ConfigurationStore>(),
-    sp.GetRequiredService<ILoggerFactory>()));
+    sp.GetRequiredService<ILoggerFactory>(), scanner: sp.GetRequiredService<ISerialPortScanner>()));
 
 // Registration on the OneDevice website ("Register this master").
 var portalUrl = RegistrationClient.ParsePortalUrl(builder.Configuration["Cloud:PortalUrl"]);

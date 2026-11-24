@@ -62,10 +62,16 @@ public sealed class MasterRegistrar(
             return Set(masterId, new RegistrationState(RegistrationPhase.Failed,
                 Message: "The OneDevice website address is not configured (Cloud:PortalUrl)."));
 
-        var port = scanner.Scan().FirstOrDefault(p => string.Equals(p.PortName, master.Connection, StringComparison.OrdinalIgnoreCase));
+        // A master with a known UID is found by it; otherwise by its COM port.
+        var ports = scanner.Scan();
+        var port = MasterPortResolver.HasUsbIdentity(master)
+            ? ports.FirstOrDefault(p => MasterPortResolver.Matches(p, master.UsbVendorId!, master.UsbProductId!, master.UsbSerialNumber!))
+            : ports.FirstOrDefault(p => string.Equals(p.PortName, master.Connection, StringComparison.OrdinalIgnoreCase));
         if (port?.UsbVendorId == null || port.UsbProductId == null)
             return Set(masterId, new RegistrationState(RegistrationPhase.Failed,
-                Message: $"No USB master found on {master.Connection}. Is it plugged in?"));
+                Message: MasterPortResolver.HasUsbIdentity(master)
+                    ? $"Master {master.UsbSerialNumber} is not plugged in."
+                    : $"No USB master found on {master.Connection}. Is it plugged in?"));
         if (port.UsbSerialNumber == null)
             return Set(masterId, new RegistrationState(RegistrationPhase.Failed,
                 Message: $"The device on {master.Connection} reports no USB serial number, so it cannot be registered."));
@@ -89,7 +95,7 @@ public sealed class MasterRegistrar(
         var cts = new CancellationTokenSource();
         _running[masterId] = cts;
         var waiting = Set(masterId, new RegistrationState(RegistrationPhase.WaitingForUser, ticket.ClaimUrl, ticket.Code, ticket.ExpiresAt));
-        _ = Task.Run(() => WaitForApprovalAsync(masterId, ticket, cts.Token));
+        _ = Task.Run(() => WaitForApprovalAsync(masterId, ticket, port, cts.Token));
         return waiting;
     }
 
@@ -110,7 +116,7 @@ public sealed class MasterRegistrar(
         foreach (var id in _running.Keys) Cancel(id);
     }
 
-    private async Task WaitForApprovalAsync(Guid masterId, ClaimTicket ticket, CancellationToken ct)
+    private async Task WaitForApprovalAsync(Guid masterId, ClaimTicket ticket, SerialPortInfo port, CancellationToken ct)
     {
         var interval = TimeSpan.FromSeconds(Math.Clamp(ticket.PollIntervalSeconds, 1, 30));
         try
@@ -137,7 +143,7 @@ public sealed class MasterRegistrar(
                     case ClaimPollStatus.Pending:
                         continue;
                     case ClaimPollStatus.Approved when result.Dps != null:
-                        await ApplyAsync(masterId, result.Dps).ConfigureAwait(false);
+                        await ApplyAsync(masterId, result.Dps, port).ConfigureAwait(false);
                         return;
                     case ClaimPollStatus.Rejected:
                         Finish(masterId, RegistrationPhase.Failed,
@@ -159,7 +165,7 @@ public sealed class MasterRegistrar(
         }
     }
 
-    private async Task ApplyAsync(Guid masterId, DpsCredentials dps)
+    private async Task ApplyAsync(Guid masterId, DpsCredentials dps, SerialPortInfo port)
     {
         var current = findMaster(masterId);
         if (current == null)
@@ -170,6 +176,11 @@ public sealed class MasterRegistrar(
 
         // Edit a copy: the runtime restarts the master with the new cloud settings.
         var master = JsonSerializer.Deserialize<MasterConfiguration>(JsonSerializer.Serialize(current))!;
+        // From now on the agent finds this master by its UID, never just by the COM port.
+        master.Connection = port.PortName;
+        master.UsbVendorId = port.UsbVendorId;
+        master.UsbProductId = port.UsbProductId;
+        master.UsbSerialNumber = port.UsbSerialNumber;
         master.Cloud = new CloudConfiguration
         {
             Mode = CloudMode.Dps,

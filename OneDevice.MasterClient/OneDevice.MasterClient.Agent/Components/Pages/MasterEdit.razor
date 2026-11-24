@@ -35,6 +35,19 @@
             <button class="btn btn-outline-secondary" @onclick="ScanPorts" title="Search again">↻</button>
         </div>
         <div class="form-text">Masters we recognise by their USB id are marked with ✔.</div>
+        @if (_model.UsbSerialNumber != null)
+        {
+            <div class="form-text">
+                Master serial number <code>@_model.UsbSerialNumber</code>: the agent finds this master on whatever COM port
+                Windows gives it, and never connects another master in its place.
+            </div>
+        }
+        else if (!string.IsNullOrEmpty(_model.Connection))
+        {
+            <div class="form-text text-warning">
+                This device reports no USB serial number: it is identified by its COM port only.
+            </div>
+        }
 
         <label class="form-label mt-3">Master type</label>
         <select class="form-select" value="@_model.MasterType" @onchange="OnTypeChanged">
@@ -180,8 +193,13 @@
     private void SelectPort(string port)
     {
         _model.Connection = port;
-        var recognised = _ports.FirstOrDefault(p => p.PortName == port)?.MasterType;
-        if (recognised != null) SetType(recognised);
+        var info = _ports.FirstOrDefault(p => p.PortName == port);
+        if (info == null) return; // "not present now": keep the stored identity
+        // The master's UID: from now on it is found by this, not by the COM port.
+        _model.UsbVendorId = info.UsbSerialNumber != null ? info.UsbVendorId : null;
+        _model.UsbProductId = info.UsbSerialNumber != null ? info.UsbProductId : null;
+        _model.UsbSerialNumber = info.UsbSerialNumber;
+        if (info.MasterType != null) SetType(info.MasterType);
     }
 
     private void OnTypeChanged(ChangeEventArgs e) => SetType(MasterCatalog.Find(e.Value?.ToString()));

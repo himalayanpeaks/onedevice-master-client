@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using OneDevice.Master.IoLink.Products;
 using OneDevice.MasterClient.Core.Cloud;
 using OneDevice.MasterClient.Core.Configuration;
+using OneDevice.MasterClient.Core.Discovery;
 using OneDevice.MasterClient.Core.Masters;
 
 namespace OneDevice.MasterClient.Core.Runtime;
@@ -14,7 +15,8 @@ public sealed class AgentRuntime(
     ConfigurationStore store,
     ILoggerFactory loggerFactory,
     Func<MasterTypeInfo, IMasterHAL>? halFactory = null,
-    Func<CloudConfiguration, ICloudConnector>? cloudFactory = null) : IAsyncDisposable
+    Func<CloudConfiguration, ICloudConnector>? cloudFactory = null,
+    ISerialPortScanner? scanner = null) : IAsyncDisposable
 {
     private readonly Func<CloudConfiguration, ICloudConnector> _cloudFactory = cloudFactory ?? (c =>
         c.Mode == CloudMode.Offline
@@ -52,6 +54,12 @@ public sealed class AgentRuntime(
         try
         {
             _config = store.Load();
+            // Registered before the USB identity was stored: take it from the DPS registration id.
+            var filled = _config.Masters.Where(MasterPortResolver.BackfillFromRegistration).ToList();
+            foreach (var master in filled)
+                _logger.LogInformation("Master {Name}: USB identity {Serial} taken from its registration", master.Name,
+                    master.UsbSerialNumber);
+            if (filled.Count > 0) store.Save(_config);
             foreach (var master in _config.Masters.Where(m => m.Enabled)) StartMaster(master);
         }
         finally
@@ -118,9 +126,21 @@ public sealed class AgentRuntime(
         if (master.SensorPorts.Any(p => p < 0 || p >= type.PortCount))
             return $"{type.DisplayName} has port(s) 1..{type.PortCount}.";
         if (master.TelemetryIntervalSeconds is < 1 or > 3600) return "Telemetry interval must be 1..3600 s.";
-        if (_config.Masters.Any(m => m.Id != master.Id &&
-                                     string.Equals(m.Connection, master.Connection, StringComparison.OrdinalIgnoreCase)))
-            return $"{master.Connection} is already used by another master.";
+        if (MasterPortResolver.CheckRegistrationMatches(master) is { } mismatch) return mismatch;
+        foreach (var other in _config.Masters.Where(m => m.Id != master.Id))
+        {
+            // Masters with a USB identity are told apart by serial number (their COM ports may change);
+            // the others by COM port.
+            if (MasterPortResolver.HasUsbIdentity(master) && MasterPortResolver.HasUsbIdentity(other))
+            {
+                if (string.Equals(other.UsbSerialNumber, master.UsbSerialNumber, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(other.UsbVendorId, master.UsbVendorId, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(other.UsbProductId, master.UsbProductId, StringComparison.OrdinalIgnoreCase))
+                    return $"Master {master.UsbSerialNumber} is already configured as “{other.Name}”.";
+            }
+            else if (string.Equals(other.Connection, master.Connection, StringComparison.OrdinalIgnoreCase))
+                return $"{master.Connection} is already used by another master.";
+        }
         return master.Cloud.Mode switch
         {
             CloudMode.ConnectionString when string.IsNullOrWhiteSpace(master.Cloud.DeviceConnectionString) =>
@@ -169,7 +189,7 @@ public sealed class AgentRuntime(
 
         var session = new MasterSession(master, type, hal, loggerFactory.CreateLogger<MasterSession>());
         var runtime = new MasterRuntime(session, _cloudFactory(master.Cloud), AgentVersion,
-            loggerFactory.CreateLogger<MasterRuntime>());
+            loggerFactory.CreateLogger<MasterRuntime>(), scanner: scanner);
         runtime.Changed += (_, _) => RaiseChanged();
         lock (_runtimes) _runtimes[master.Id] = runtime;
         runtime.Start();
