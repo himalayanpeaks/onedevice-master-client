@@ -1,5 +1,6 @@
 using OneDevice.MasterClient.Agent;
 using OneDevice.MasterClient.Agent.Components;
+using OneDevice.MasterClient.Core.Cloud;
 using OneDevice.MasterClient.Core.Configuration;
 using OneDevice.MasterClient.Core.Discovery;
 using OneDevice.MasterClient.Core.Runtime;
@@ -35,6 +36,19 @@ builder.Services.AddSingleton(new ConfigurationStore(builder.Configuration["Agen
 builder.Services.AddSingleton<ISerialPortScanner, SerialPortScanner>();
 builder.Services.AddSingleton(sp => new AgentRuntime(sp.GetRequiredService<ConfigurationStore>(),
     sp.GetRequiredService<ILoggerFactory>()));
+
+// Registration on the OneDevice website ("Register this master").
+var portalUrl = RegistrationClient.ParsePortalUrl(builder.Configuration["Cloud:PortalUrl"]);
+builder.Services.AddHttpClient("onedevice", http => http.Timeout = TimeSpan.FromSeconds(30));
+builder.Services.AddSingleton<IRegistrationClient>(sp =>
+    new RegistrationClient(sp.GetRequiredService<IHttpClientFactory>().CreateClient("onedevice"), portalUrl));
+builder.Services.AddSingleton(sp =>
+{
+    var runtime = sp.GetRequiredService<AgentRuntime>();
+    return new MasterRegistrar(sp.GetRequiredService<IRegistrationClient>(), sp.GetRequiredService<ISerialPortScanner>(),
+        id => runtime.Configuration.Masters.FirstOrDefault(m => m.Id == id), m => runtime.SaveMasterAsync(m),
+        sp.GetRequiredService<ILogger<MasterRegistrar>>());
+});
 builder.Services.AddHostedService<AgentHostedService>();
 
 var app = builder.Build();

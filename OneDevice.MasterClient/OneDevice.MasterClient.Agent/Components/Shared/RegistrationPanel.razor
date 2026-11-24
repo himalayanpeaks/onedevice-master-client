@@ -1,0 +1,85 @@
+@* Registration of one master with the user's OneDevice account. *@
+@{
+    var state = Registrar.State(Master.Id);
+}
+
+@switch (state.Phase)
+{
+    case RegistrationPhase.Starting:
+        <div class="alert alert-secondary py-2 d-flex align-items-center gap-2">
+            <span class="spinner-border spinner-border-sm"></span> Contacting OneDevice…
+        </div>
+        break;
+
+    case RegistrationPhase.WaitingForUser:
+        <div class="alert alert-info">
+            <div class="fw-semibold mb-1">Finish the registration in your browser</div>
+            <div class="small mb-2">
+                Sign in to OneDevice and confirm the master. Registration code
+                <code class="fs-6">@state.Code</code>, valid until @state.ExpiresAt?.ToLocalTime().ToString("HH:mm").
+                This page continues by itself once you have confirmed.
+            </div>
+            <div class="d-flex gap-2 align-items-center">
+                <a class="btn btn-primary btn-sm" href="@state.ClaimUrl" target="_blank" rel="noopener">Open registration page ↗</a>
+                <button class="btn btn-outline-secondary btn-sm" @onclick="() => Registrar.Cancel(Master.Id)">Cancel</button>
+                <span class="spinner-border spinner-border-sm text-info ms-1" title="Waiting for confirmation"></span>
+            </div>
+        </div>
+        break;
+
+    case RegistrationPhase.Completed:
+        <div class="alert alert-success py-2">✔ @state.Message</div>
+        break;
+
+    default:
+        @if (state.Phase == RegistrationPhase.Failed)
+        {
+            <div class="alert alert-danger py-2 d-flex align-items-center gap-2 flex-wrap">
+                <span>@state.Message</span>
+                <button class="btn btn-sm btn-outline-danger ms-auto" disabled="@_starting" @onclick="StartAsync">Try again</button>
+            </div>
+        }
+        else if (Master.Cloud.Mode == CloudMode.Dps)
+        {
+            <div class="small text-muted mb-2">
+                Registered with OneDevice as <code>@Master.Cloud.DpsRegistrationId</code>.
+            </div>
+        }
+        else
+        {
+            <div class="alert alert-light border d-flex align-items-center gap-3 flex-wrap py-2">
+                <span>Register this master with your OneDevice account to use it in the cloud.</span>
+                @if (Registrar.IsAvailable)
+                {
+                    <button class="btn btn-sm btn-primary ms-auto" disabled="@_starting" @onclick="StartAsync">
+                        @(_starting ? "Starting…" : "Register this master")
+                    </button>
+                }
+                else
+                {
+                    <span class="small text-muted ms-auto">The OneDevice website address is not configured (Cloud:PortalUrl).</span>
+                }
+            </div>
+        }
+        break;
+}
+
+@code {
+    [Parameter, EditorRequired] public MasterConfiguration Master { get; set; } = default!;
+    [Parameter, EditorRequired] public MasterRegistrar Registrar { get; set; } = default!;
+
+    private bool _starting;
+
+    private async Task StartAsync()
+    {
+        _starting = true;
+        try
+        {
+            await Registrar.StartAsync(Master.Id);
+        }
+        finally
+        {
+            _starting = false;
+        }
+    }
+}

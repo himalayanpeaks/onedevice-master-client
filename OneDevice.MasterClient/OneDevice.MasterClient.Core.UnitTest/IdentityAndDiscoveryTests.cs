@@ -50,6 +50,16 @@ public class IdentityAndDiscoveryTests
         Assert.Equal(isTmg ? MasterCatalog.TmgUsbV2 : null, info.MasterType);
     }
 
+    [Theory]
+    [InlineData(@"USB\VID_2843&PID_0201\1392765243", "1392765243")] // TMG master: real USB serial number
+    [InlineData(@"USB\VID_2843&PID_0201\6&3365fbaf&0&5", null)] // no USB serial: Windows-generated id
+    [InlineData(@"FTDIBUS\VID_0403+PID_6001+A601IXGGA\0000", null)] // not a plain USB device id
+    [InlineData(@"ACPI\PNP0501\0", null)]
+    public void UsbSerialNumber_IsTakenFromTheInstanceId(string pnp, string? serial)
+    {
+        Assert.Equal(serial, SerialPortScanner.Parse("USB Serial Device (COM3)", pnp)!.UsbSerialNumber);
+    }
+
     [Fact]
     public void NonComDevice_IsIgnored()
     {
