@@ -172,6 +172,7 @@ public class RegistrationTests
         Assert.Equal("0ne00TEST", saved.Cloud.DpsIdScope);
         Assert.Equal("usb-2843-0201-1392765243", saved.Cloud.DpsRegistrationId);
         Assert.Equal("a2V5", saved.Cloud.DpsSymmetricKey);
+        Assert.Equal(("2843", "0201", "1392765243"), (saved.UsbVendorId, saved.UsbProductId, saved.UsbSerialNumber));
         Assert.Equal(CloudMode.Offline, f.Master.Cloud.Mode); // the live configuration is replaced by the runtime, not edited
     }
 

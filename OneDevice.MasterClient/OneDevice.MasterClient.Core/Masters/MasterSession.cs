@@ -112,6 +112,15 @@ public sealed class MasterSession : IAsyncDisposable
     /// <summary>Connection, ports or identities changed.</summary>
     public event EventHandler? StateChanged;
 
+    /// <summary>The master cannot be connected right now (e.g. not plugged in); shown on the local page.</summary>
+    internal void ReportUnavailable(string error)
+    {
+        if (LastError == error) return;
+        LastError = error;
+        _logger.LogWarning("{Error}", error);
+        RaiseStateChanged();
+    }
+
     public async Task<bool> ConnectAsync(CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct).ConfigureAwait(false);

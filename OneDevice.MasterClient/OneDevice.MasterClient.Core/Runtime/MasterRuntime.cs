@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using OneDevice.MasterClient.Core.Cloud;
+using OneDevice.MasterClient.Core.Discovery;
 using OneDevice.MasterClient.Core.Masters;
 
 namespace OneDevice.MasterClient.Core.Runtime;
@@ -17,9 +18,16 @@ public sealed class MasterRuntime : IAsyncDisposable, IProcessDataStreaming
     private readonly CancellationTokenSource _stop = new();
     private Task? _loop;
 
+    private readonly ISerialPortScanner? _scanner;
+
+    /// <param name="scanner">
+    ///     Finds a master with a USB identity on whatever COM port it has now. Without a scanner the configured port
+    ///     is used as is.
+    /// </param>
     public MasterRuntime(MasterSession session, ICloudConnector cloud, string agentVersion, ILogger logger,
-        TimeProvider? time = null)
+        TimeProvider? time = null, ISerialPortScanner? scanner = null)
     {
+        _scanner = scanner;
         Session = session;
         Cloud = cloud;
         _agentVersion = agentVersion;
@@ -145,7 +153,7 @@ public sealed class MasterRuntime : IAsyncDisposable, IProcessDataStreaming
         {
             try
             {
-                if (!Session.IsConnected && await Session.ConnectAsync(ct).ConfigureAwait(false))
+                if (!Session.IsConnected && FindPort() && await Session.ConnectAsync(ct).ConfigureAwait(false))
                 {
                     await Session.ProbePortsAsync(ct).ConfigureAwait(false);
                     await ReportAsync(ct).ConfigureAwait(false);
@@ -177,6 +185,44 @@ public sealed class MasterRuntime : IAsyncDisposable, IProcessDataStreaming
                 break;
             }
         }
+    }
+
+    /// <summary>
+    ///     Points the session at the COM port where this master (by USB serial number) is plugged in now. False when it
+    ///     is not plugged in: then nothing is opened, so another master that got this master's old COM port is never
+    ///     connected under this master's identity.
+    /// </summary>
+    private bool FindPort()
+    {
+        var master = Session.Configuration;
+        if (_scanner == null || !MasterPortResolver.HasUsbIdentity(master)) return true;
+        IReadOnlyList<SerialPortInfo> ports;
+        try
+        {
+            ports = _scanner.Scan();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Master {Name}: COM ports could not be listed", master.Name);
+            Session.ReportUnavailable($"COM ports could not be listed: {ex.Message}");
+            return false;
+        }
+
+        var found = MasterPortResolver.Resolve(master, ports);
+        if (found.Port == null)
+        {
+            Session.ReportUnavailable(found.Error!);
+            return false;
+        }
+
+        if (!string.Equals(found.Port, master.Connection, StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogInformation("Master {Name} ({Serial}) is on {Port} now (was {Previous})", master.Name,
+                master.UsbSerialNumber, found.Port, master.Connection);
+            master.Connection = found.Port;
+        }
+
+        return true;
     }
 
     private async Task ReportAsync(CancellationToken ct)

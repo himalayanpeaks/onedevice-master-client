@@ -17,8 +17,23 @@ public sealed class MasterConfiguration
     /// <summary>Key into <see cref="Masters.MasterCatalog" />, e.g. "TmgUsbV2".</summary>
     public string MasterType { get; set; } = "";
 
-    /// <summary>Connection of the master to this PC, e.g. "COM3".</summary>
+    /// <summary>
+    ///     Connection of the master to this PC, e.g. "COM3". For a master with a USB identity this is only the port it
+    ///     was last seen on: the agent looks the master up by its serial number before every connection attempt.
+    /// </summary>
     public string Connection { get; set; } = "";
+
+    /// <summary>USB vendor id of the master (hex), e.g. "2843". Null when unknown.</summary>
+    public string? UsbVendorId { get; set; }
+
+    /// <summary>USB product id of the master (hex), e.g. "0201".</summary>
+    public string? UsbProductId { get; set; }
+
+    /// <summary>
+    ///     USB serial number stored in the master itself, e.g. "1392765243": the master's UID. Same on every PC and USB
+    ///     socket. Null for masters without one (then the master is found by <see cref="Connection" /> only).
+    /// </summary>
+    public string? UsbSerialNumber { get; set; }
 
     /// <summary>Master ports (0-based) the customer uses for sensors.</summary>
     public List<int> SensorPorts { get; set; } = [0];

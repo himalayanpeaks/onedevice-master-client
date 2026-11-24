@@ -23,7 +23,7 @@
     <div class="card mb-4">
         <div class="card-header d-flex align-items-center gap-2 flex-wrap">
             <strong>@master.Name</strong>
-            <span class="text-muted">@(type?.DisplayName ?? master.MasterType) on @master.Connection</span>
+            <span class="text-muted">@(type?.DisplayName ?? master.MasterType) on @master.Connection@(master.UsbSerialNumber is { } sn ? $" · S/N {sn}" : "")</span>
             <span class="ms-auto"></span>
             @if (!master.Enabled)
             {
